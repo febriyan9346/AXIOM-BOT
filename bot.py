@@ -42,7 +42,6 @@ class BotTemplate:
             "x-client-info": "supabase-js-web/2.102.1"
         })
         self.log_lock = threading.Lock()
-        self.feeds = self.fetch_okx_tickers()
 
     def get_wib_time(self):
         try:
@@ -99,21 +98,6 @@ class BotTemplate:
             self.log(f"Failed to process private key: {e}", "ERROR")
             return None
 
-    def fetch_okx_tickers(self):
-        self.log("Fetching ticker data from OKX...", "INFO")
-        try:
-            res = requests.get("https://www.okx.com/api/v5/market/tickers?instType=SPOT", timeout=10)
-            data = res.json()
-            feeds = []
-            for item in data.get('data', []):
-                feed = item['instId'].replace('-', '/')
-                feeds.append(feed)
-            self.log(f"Successfully fetched {len(feeds)} tickers from OKX.", "SUCCESS")
-            return feeds
-        except Exception as e:
-            self.log(f"Failed to fetch OKX tickers, using fallback list.", "WARNING")
-            return ["HNT/USD", "BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT"]
-
     def get_rank(self, wallet, proxy_dict):
         url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/leaderboard"
         try:
@@ -154,41 +138,42 @@ class BotTemplate:
         except Exception as e:
             self.log(f"Daily Check-in Error: {e}", "ERROR")
 
-    def submit_points(self, wallet, feed, proxy_dict):
-        url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/submit"
+    def send_heartbeat(self, wallet, proxy_dict):
+        url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/heartbeat"
         payload = {
-            "wallet_address": wallet,
-            "points": 5,
-            "feed": feed,
-            "accepted": True,
-            "accuracy": 100
+            "wallet_address": wallet
         }
         try:
             res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=15)
             if res.status_code in [200, 201]:
                 data = res.json()
                 if data.get("success"):
-                    return data.get('points_added', 5)
+                    return True, data.get("points_added", 0), data.get("total_points", 0)
+                else:
+                    self.log(f"Heartbeat returned false: {data}", "WARNING")
             else:
-                self.log(f"Submit Points Failed | Status: {res.status_code}", "ERROR")
+                self.log(f"Heartbeat Failed | Status: {res.status_code} | Resp: {res.text}", "ERROR")
         except Exception as e:
-            self.log(f"Submit Points Error: {e}", "ERROR")
-        return 0
+            self.log(f"Heartbeat Error: {e}", "ERROR")
+        return False, 0, 0
 
-    def ping_uptime(self, wallet, proxy_dict):
-        url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/uptime"
-        payload = {
-            "wallet_address": wallet,
-            "seconds": 60
-        }
+    def get_activity(self, wallet, proxy_dict):
+        url = f"https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/activity?wallet={wallet}"
         try:
-            res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=15)
+            res = requests.get(url, headers=self.headers_default, proxies=proxy_dict, timeout=15)
             if res.status_code in [200, 201]:
-                self.log("Ping Uptime 60s Success", "SUCCESS")
-            else:
-                self.log(f"Ping Uptime Failed | Status: {res.status_code}", "ERROR")
+                data = res.json()
+                streak = data.get("streak", 0)
+                days = data.get("days", [])
+                validations = 0
+                hours = 0
+                if len(days) > 0:
+                    validations = days[0].get("validations", 0)
+                    hours = days[0].get("hours", 0)
+                return streak, validations, hours
         except Exception as e:
-            self.log(f"Ping Uptime Error: {e}", "ERROR")
+            self.log(f"Activity Error: {e}", "ERROR")
+        return 0, 0, 0
 
     def print_banner(self):
         try:
@@ -285,7 +270,6 @@ class BotTemplate:
                         "proxy": proxy_dict,
                         "total_points": total_points,
                         "last_checkin": 0,
-                        "last_uptime": 0,
                         "index": i + 1
                     })
                 except Exception as e:
@@ -314,21 +298,24 @@ class BotTemplate:
                                 self.daily_checkin(wallet, proxy_dict)
                                 acc['last_checkin'] = time.time()
                             
-                            if now - acc['last_uptime'] >= 60:
-                                self.ping_uptime(wallet, proxy_dict)
-                                acc['last_uptime'] = time.time()
-
-                            feed = random.choice(self.feeds) if self.feeds else "HNT/USD"
-                            added_points = self.submit_points(wallet, feed, proxy_dict)
+                            self.log("Sending Heartbeat...", "INFO")
+                            is_success, added_points, updated_total = self.send_heartbeat(wallet, proxy_dict)
                             
-                            if added_points > 0:
-                                acc['total_points'] += added_points
-                                self.log(f"Farming Success", "SUCCESS")
+                            if is_success:
+                                if updated_total > 0:
+                                    acc['total_points'] = updated_total
+                                self.log(f"Heartbeat Success", "SUCCESS")
                                 self.log(f"Reward       : +{added_points} Pts", "INFO")
-                                self.log(f"Feed         : {feed}", "INFO")
                                 self.log(f"Total Points : {acc['total_points']}", "INFO")
+                                
                                 rank = self.get_rank(wallet, proxy_dict)
                                 self.log(f"Rank         : {rank}", "INFO")
+                                
+                                streak, validations, hours = self.get_activity(wallet, proxy_dict)
+                                self.log(f"Streak       : {streak} Days", "INFO")
+                                self.log(f"Validations  : {validations}", "INFO")
+                                self.log(f"Hours Active : {hours} Hrs", "INFO")
+                                
                                 success_count += 1
                             
                             if acc['index'] < len(accounts_state):
