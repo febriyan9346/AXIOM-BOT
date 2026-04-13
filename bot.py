@@ -101,7 +101,7 @@ class BotTemplate:
     def get_rank(self, wallet, proxy_dict):
         url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/leaderboard"
         try:
-            res = requests.get(url, headers=self.headers_default, proxies=proxy_dict, timeout=15)
+            res = requests.get(url, headers=self.headers_default, proxies=proxy_dict, timeout=60)
             if res.status_code in [200, 201]:
                 data = res.json()
                 for item in data.get('leaderboard', []):
@@ -115,7 +115,7 @@ class BotTemplate:
         url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/register"
         payload = {"wallet_address": wallet}
         try:
-            res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=15)
+            res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=60)
             if res.status_code in [200, 201]:
                 data = res.json()
                 self.log("Register Success", "SUCCESS")
@@ -130,7 +130,7 @@ class BotTemplate:
         url = "https://pouthobmqvfbnnyyamkt.supabase.co/rest/v1/rpc/daily_checkin"
         payload = {"_wallet": wallet}
         try:
-            res = requests.post(url, json=payload, headers=self.headers_checkin, proxies=proxy_dict, timeout=15)
+            res = requests.post(url, json=payload, headers=self.headers_checkin, proxies=proxy_dict, timeout=60)
             if res.status_code in [200, 201, 204]:
                 self.log("Daily Check-in Success", "SUCCESS")
             else:
@@ -144,23 +144,23 @@ class BotTemplate:
             "wallet_address": wallet
         }
         try:
-            res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=15)
+            res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=60)
             if res.status_code in [200, 201]:
                 data = res.json()
                 if data.get("success"):
-                    return True, data.get("points_added", 0), data.get("total_points", 0)
+                    return True, data.get("throttled", False), data.get("points_added", 0), data.get("total_points", 0)
                 else:
                     self.log(f"Heartbeat returned false: {data}", "WARNING")
             else:
                 self.log(f"Heartbeat Failed | Status: {res.status_code} | Resp: {res.text}", "ERROR")
         except Exception as e:
             self.log(f"Heartbeat Error: {e}", "ERROR")
-        return False, 0, 0
+        return False, False, 0, 0
 
     def get_activity(self, wallet, proxy_dict):
         url = f"https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/activity?wallet={wallet}"
         try:
-            res = requests.get(url, headers=self.headers_default, proxies=proxy_dict, timeout=15)
+            res = requests.get(url, headers=self.headers_default, proxies=proxy_dict, timeout=60)
             if res.status_code in [200, 201]:
                 data = res.json()
                 streak = data.get("streak", 0)
@@ -299,24 +299,28 @@ class BotTemplate:
                                 acc['last_checkin'] = time.time()
                             
                             self.log("Sending Heartbeat...", "INFO")
-                            is_success, added_points, updated_total = self.send_heartbeat(wallet, proxy_dict)
+                            is_success, is_throttled, added_points, updated_total = self.send_heartbeat(wallet, proxy_dict)
                             
                             if is_success:
-                                if updated_total > 0:
-                                    acc['total_points'] = updated_total
-                                self.log(f"Heartbeat Success", "SUCCESS")
-                                self.log(f"Reward       : +{added_points} Pts", "INFO")
-                                self.log(f"Total Points : {acc['total_points']}", "INFO")
-                                
-                                rank = self.get_rank(wallet, proxy_dict)
-                                self.log(f"Rank         : {rank}", "INFO")
-                                
-                                streak, validations, hours = self.get_activity(wallet, proxy_dict)
-                                self.log(f"Streak       : {streak} Days", "INFO")
-                                self.log(f"Validations  : {validations}", "INFO")
-                                self.log(f"Hours Active : {hours} Hrs", "INFO")
-                                
-                                success_count += 1
+                                if is_throttled:
+                                    self.log("Heartbeat Throttled (Too Fast)", "WARNING")
+                                    success_count += 1
+                                else:
+                                    if updated_total > 0:
+                                        acc['total_points'] = updated_total
+                                    self.log("Heartbeat Success", "SUCCESS")
+                                    self.log(f"Reward       : +{added_points} Pts", "INFO")
+                                    self.log(f"Total Points : {acc['total_points']}", "INFO")
+                                    
+                                    rank = self.get_rank(wallet, proxy_dict)
+                                    self.log(f"Rank         : {rank}", "INFO")
+                                    
+                                    streak, validations, hours = self.get_activity(wallet, proxy_dict)
+                                    self.log(f"Streak       : {streak} Days", "INFO")
+                                    self.log(f"Validations  : {validations}", "INFO")
+                                    self.log(f"Hours Active : {hours} Hrs", "INFO")
+                                    
+                                    success_count += 1
                             
                             if acc['index'] < len(accounts_state):
                                 print(f"{Fore.WHITE}............................................................{Style.RESET_ALL}")
@@ -330,7 +334,7 @@ class BotTemplate:
                     print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
                     
                     cycle += 1
-                    self.countdown(30)
+                    self.countdown(60)
                 except Exception as e:
                     self.log(f"Cycle error: {e}", "ERROR")
                     time.sleep(5)
