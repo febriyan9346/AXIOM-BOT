@@ -27,19 +27,19 @@ class BotTemplate:
             "content-type": "application/json",
             "origin": "https://axiomoracle.xyz",
             "referer": "https://axiomoracle.xyz/",
-            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "cross-site",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
         }
         self.headers_checkin = self.headers_default.copy()
         self.headers_checkin.update({
             "authorization": f"Bearer {self.api_key}",
             "content-profile": "public",
-            "x-client-info": "supabase-js-web/2.102.1"
+            "x-client-info": "supabase-js-web/2.103.3"
         })
         self.log_lock = threading.Lock()
 
@@ -111,20 +111,40 @@ class BotTemplate:
             pass
         return "Unranked"
 
+    def get_status(self, wallet, proxy_dict):
+        url = f"https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/status?wallet={wallet}"
+        try:
+            res = requests.get(url, headers=self.headers_default, proxies=proxy_dict, timeout=60)
+            if res.status_code in [200, 201]:
+                return res.json()
+        except Exception:
+            pass
+        return {}
+
+    def get_dashboard_summary(self, wallet, proxy_dict):
+        url = "https://pouthobmqvfbnnyyamkt.supabase.co/rest/v1/rpc/get_dashboard_summary_cached"
+        payload = {"_wallet": wallet}
+        try:
+            res = requests.post(url, json=payload, headers=self.headers_checkin, proxies=proxy_dict, timeout=60)
+            if res.status_code in [200, 201]:
+                return res.json()
+        except Exception:
+            pass
+        return {}
+
     def register(self, wallet, proxy_dict):
         url = "https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/register"
         payload = {"wallet_address": wallet}
         try:
             res = requests.post(url, json=payload, headers=self.headers_default, proxies=proxy_dict, timeout=60)
             if res.status_code in [200, 201]:
-                data = res.json()
                 self.log("Register Success", "SUCCESS")
-                return data.get('stats', {}).get('total_points', 0)
+                return True
             else:
                 self.log(f"Register Failed | Status: {res.status_code}", "ERROR")
         except Exception as e:
             self.log(f"Register Error: {e}", "ERROR")
-        return 0
+        return False
 
     def daily_checkin(self, wallet, proxy_dict):
         url = "https://pouthobmqvfbnnyyamkt.supabase.co/rest/v1/rpc/daily_checkin"
@@ -148,14 +168,14 @@ class BotTemplate:
             if res.status_code in [200, 201]:
                 data = res.json()
                 if data.get("success"):
-                    return True, data.get("throttled", False), data.get("points_added", 0), data.get("total_points", 0)
+                    return True, data.get("throttled", False), data
                 else:
                     self.log(f"Heartbeat returned false: {data}", "WARNING")
             else:
-                self.log(f"Heartbeat Failed | Status: {res.status_code} | Resp: {res.text}", "ERROR")
+                self.log(f"Heartbeat Failed | Status: {res.status_code}", "ERROR")
         except Exception as e:
             self.log(f"Heartbeat Error: {e}", "ERROR")
-        return False, False, 0, 0
+        return False, False, {}
 
     def get_activity(self, wallet, proxy_dict):
         url = f"https://pouthobmqvfbnnyyamkt.supabase.co/functions/v1/node-api/activity?wallet={wallet}"
@@ -260,15 +280,19 @@ class BotTemplate:
 
                     self.log(f"Initializing Account {i+1}", "INFO")
                     self.log(f"Wallet       : {wallet[:6]}...{wallet[-4:]}", "INFO")
-                    total_points = self.register(wallet, proxy_dict)
-                    self.log(f"Initial Pts  : {total_points}", "INFO")
+                    self.register(wallet, proxy_dict)
+                    
+                    status_data = self.get_status(wallet, proxy_dict)
+                    uptime = status_data.get('lifetime_uptime', 0)
+                    
+                    self.log(f"Initial Uptime: {uptime}", "INFO")
                     rank = self.get_rank(wallet, proxy_dict)
                     self.log(f"Current Rank : {rank}", "INFO")
                     
                     accounts_state.append({
                         "wallet": wallet,
                         "proxy": proxy_dict,
-                        "total_points": total_points,
+                        "uptime": uptime,
                         "last_checkin": 0,
                         "index": i + 1
                     })
@@ -299,18 +323,29 @@ class BotTemplate:
                                 acc['last_checkin'] = time.time()
                             
                             self.log("Sending Heartbeat...", "INFO")
-                            is_success, is_throttled, added_points, updated_total = self.send_heartbeat(wallet, proxy_dict)
+                            is_success, is_throttled, hb_data = self.send_heartbeat(wallet, proxy_dict)
                             
                             if is_success:
                                 if is_throttled:
                                     self.log("Heartbeat Throttled (Too Fast)", "WARNING")
                                     success_count += 1
                                 else:
-                                    if updated_total > 0:
-                                        acc['total_points'] = updated_total
                                     self.log("Heartbeat Success", "SUCCESS")
-                                    self.log(f"Reward       : +{added_points} Pts", "INFO")
-                                    self.log(f"Total Points : {acc['total_points']}", "INFO")
+                                    
+                                    dash_data = self.get_dashboard_summary(wallet, proxy_dict)
+                                    status_data = self.get_status(wallet, proxy_dict)
+                                    
+                                    node_active = status_data.get("node_active", True)
+                                    boost = dash_data.get("boost", hb_data.get("referral_multiplier", 1))
+                                    accuracy = dash_data.get("node_accuracy", hb_data.get("consensus_accuracy", 100))
+                                    uptime = status_data.get("lifetime_uptime", hb_data.get("lifetime_uptime", acc['uptime']))
+                                    
+                                    acc['uptime'] = uptime
+                                    
+                                    self.log(f"Node Active  : {node_active}", "INFO")
+                                    self.log(f"Accuracy     : {accuracy}%", "INFO")
+                                    self.log(f"Boost        : {boost}x", "INFO")
+                                    self.log(f"Uptime       : {uptime}", "INFO")
                                     
                                     rank = self.get_rank(wallet, proxy_dict)
                                     self.log(f"Rank         : {rank}", "INFO")
@@ -324,17 +359,17 @@ class BotTemplate:
                             
                             if acc['index'] < len(accounts_state):
                                 print(f"{Fore.WHITE}............................................................{Style.RESET_ALL}")
-                                time.sleep(random.randint(1, 3))
+                                time.sleep(3)
                         except Exception as e:
                             self.log(f"Error processing account {acc['index']}: {e}", "ERROR")
-                            time.sleep(2)
+                            time.sleep(3)
                     
                     print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
                     self.log(f"Cycle {cycle} Complete | Success: {success_count}/{len(accounts_state)}", "CYCLE")
                     print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
                     
                     cycle += 1
-                    self.countdown(60)
+                    self.countdown(59)
                 except Exception as e:
                     self.log(f"Cycle error: {e}", "ERROR")
                     time.sleep(5)
